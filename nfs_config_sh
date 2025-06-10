@@ -1,8 +1,3 @@
-touch nfs_config_sh
-chmod +x nfs_config_sh
-
-vi nfs_config_sh
- 
 #!/bin/bash
  
 echo "Select mode:"
