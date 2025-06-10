@@ -1,0 +1,78 @@
+#!/bin/bash
+ 
+# NFS Integration Script with UFW Configuration and Error Handling
+# Run this script as root (or with sudo) on both client and server
+ 
+read -p "Enter the role of this machine (server/client): " ROLE
+read -p "Enter the counterpart IP (Client IP if you're on server, or Server IP if you're on client): " PEER_IP
+ 
+# --------- Common Firewall Setup (Client or Server) ---------
+echo "Ensuring UFW is installed and active..."
+apt update && apt install -y ufw
+ 
+echo "Allowing SSH to prevent lockout..."
+ufw allow ssh
+ 
+echo "Allowing NFS traffic from $PEER_IP..."
+ufw allow from $PEER_IP to any port 2049 proto tcp
+ 
+echo "Enabling UFW..."
+ufw --force enable
+ 
+# --------- SERVER SETUP ---------
+if [[ "$ROLE" == "server" ]]; then
+    echo "Installing NFS server utilities..."
+    if ! apt install -y nfs-kernel-server; then
+        echo "ERROR: Failed to install nfs-kernel-server. Exiting."
+        exit 1
+    fi
+ 
+    echo "Checking for exportfs command..."
+    if ! command -v exportfs >/dev/null; then
+        echo "ERROR: exportfs command not found. NFS server installation may have failed."
+        exit 1
+    fi
+ 
+    echo "Creating export directory..."
+    mkdir -p /nfsshare
+    chown nobody:nogroup /nfsshare
+ 
+    EXPORTS_LINE="/nfsshare ${PEER_IP}(rw,sync,no_subtree_check)"
+    echo "Updating /etc/exports..."
+    grep -q "$PEER_IP" /etc/exports || echo "$EXPORTS_LINE" >> /etc/exports
+ 
+    echo "Applying export changes..."
+    exportfs -ra
+ 
+    echo "Checking for nfs-kernel-server service..."
+    if systemctl list-unit-files | grep -q nfs-kernel-server.service; then
+        echo "Restarting nfs-kernel-server..."
+        systemctl restart nfs-kernel-server
+    else
+        echo "Warning: nfs-kernel-server.service not found. NFS may not function properly."
+    fi
+ 
+# --------- CLIENT SETUP ---------
+elif [[ "$ROLE" == "client" ]]; then
+    echo "Installing NFS client utilities..."
+    apt install -y nfs-common rpcbind
+ 
+    echo "Creating mount directory..."
+    mkdir -p /nfs_clinetshare
+ 
+    echo "Updating /etc/fstab for persistent mount..."
+    grep -q "$PEER_IP:/nfsshare" /etc/fstab || echo "$PEER_IP:/nfsshare /nfs_clinetshare nfs defaults 0 0" >> /etc/fstab
+ 
+    echo "Mounting NFS share..."
+    mount -a
+    mount /nfs_clinetshare
+ 
+    echo "Verifying mount..."
+    df -h /nfs_clinetshare
+ 
+else
+    echo "Invalid role specified. Please enter 'server' or 'client'."
+    exit 1
+fi
+ 
+echo "$ROLE setup complete with UFW and NFS configuration."
