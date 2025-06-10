@@ -1,0 +1,93 @@
+touch nfs_config_sh
+chmod +x nfs_config_sh
+
+vi nfs_config_sh
+ 
+#!/bin/bash
+ 
+echo "Select mode:"
+select mode in "NFS Server" "NFS Client" "Exit"; do
+  case $mode in
+    "NFS Server")
+      echo "🚀 Starting NFS Server Setup..."
+ 
+      echo "📦 Listing available disks (excluding mounted)..."
+      lsblk -dpno NAME,SIZE | grep -v "$(df -h | awk '{print $1}' | grep ^/dev/ | tr '\n' '|')" | sed 's/|$//'
+ 
+      read -p "👉 Enter disk to format (e.g., /dev/sdc): " DISK
+      if [ ! -b "$DISK" ]; then echo "❌ Disk not found."; exit 1; fi
+ 
+      read -p "⚠️ Are you sure to format $DISK? (y/n): " confirm
+      [[ $confirm != "y" ]] && echo "Cancelled." && exit 0
+ 
+      read -p "📁 Enter mount point directory (e.g., /nfsshare): " MOUNT_POINT
+ 
+      echo "🔧 Formatting $DISK..."
+      mkfs.ext4 -F "$DISK"
+ 
+      mkdir -p "$MOUNT_POINT"
+      mount "$DISK" "$MOUNT_POINT"
+ 
+      UUID=$(blkid -s UUID -o value "$DISK")
+      [ -z "$UUID" ] && echo "❌ UUID fetch failed." && exit 1
+ 
+      cp /etc/fstab /etc/fstab.backup
+      echo "UUID=$UUID $MOUNT_POINT ext4 defaults,nofail 0 2" >> /etc/fstab
+ 
+      echo "📦 Installing NFS Server..."
+      apt update && apt install -y nfs-kernel-server
+ 
+      chown -R nobody:nogroup "$MOUNT_POINT"
+      chmod 777 "$MOUNT_POINT"
+ 
+      read -p "🌐 Enter client IP (e.g., 10.0.0.22): " CLIENT_IP
+      echo "$MOUNT_POINT $CLIENT_IP(rw,sync,no_subtree_check)" >> /etc/exports
+ 
+      exportfs -a
+      systemctl restart nfs-kernel-server
+ 
+      echo "🛡️ Configuring UFW on Server..."
+      ufw allow from "$CLIENT_IP" to any port 2049 proto tcp
+      ufw allow from "$CLIENT_IP" to any port 2049 proto udp
+      ufw allow from "$CLIENT_IP" to any port 111 proto tcp
+      ufw allow from "$CLIENT_IP" to any port 111 proto udp
+      ufw --force enable
+ 
+      echo "✅ NFS Server setup complete and ready to share $MOUNT_POINT"
+      break
+      ;;
+ 
+    "NFS Client")
+      echo "🚀 Starting NFS Client Setup..."
+ 
+      apt update && apt install -y nfs-common rpcbind
+ 
+      read -p "📁 Enter local mount directory (e.g., /nfs_clientshare): " CLIENT_MOUNT
+      mkdir -p "$CLIENT_MOUNT"
+ 
+      read -p "🌐 Enter NFS Server IP (e.g., 10.0.0.12): " SERVER_IP
+      read -p "📂 Enter server export path (e.g., /nfsshare): " SERVER_SHARE
+ 
+      echo "$SERVER_IP:$SERVER_SHARE $CLIENT_MOUNT nfs defaults 0 0" >> /etc/fstab
+      mount -a
+ 
+      echo "🛡️ Configuring UFW on Client..."
+      ufw allow to "$SERVER_IP" port 2049 proto tcp
+      ufw allow to "$SERVER_IP" port 2049 proto udp
+      ufw allow to "$SERVER_IP" port 111 proto tcp
+      ufw allow to "$SERVER_IP" port 111 proto udp
+      ufw --force enable
+ 
+      echo "✅ NFS Client mounted $SERVER_IP:$SERVER_SHARE at $CLIENT_MOUNT"
+      df -h "$CLIENT_MOUNT"
+      break
+      ;;
+ 
+    "Exit")
+      echo "👋 Exiting."
+      exit 0
+      ;;
+ 
+    *) echo "Invalid option. Try again." ;;
+  esac
+done
