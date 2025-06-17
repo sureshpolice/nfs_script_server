@@ -1,78 +1,141 @@
 #!/bin/bash
- 
-# NFS Integration Script with UFW Configuration and Error Handling
-# Run this script as root (or with sudo) on both client and server
- 
+
+set -e
+
+detect_distro() {
+  if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    DISTRO=$ID
+  else
+    echo "❌ Cannot determine OS version. Exiting."
+    exit 1
+  fi
+}
+
+install_firewall_and_open_ports() {
+  echo "Configuring firewall for NFS access..."
+
+  case $DISTRO in
+    ubuntu|debian)
+      apt update && apt install -y ufw
+      ufw allow ssh
+      ufw allow from "$PEER_IP" to any port 2049 proto tcp
+      ufw allow from "$PEER_IP" to any port 2049 proto udp
+      ufw allow from "$PEER_IP" to any port 111 proto tcp
+      ufw allow from "$PEER_IP" to any port 111 proto udp
+      ufw --force enable
+      ;;
+    rhel|centos|fedora)
+      yum install -y firewalld
+      systemctl enable --now firewalld
+      firewall-cmd --permanent --add-service=nfs
+      firewall-cmd --permanent --add-service=rpc-bind
+      firewall-cmd --permanent --add-service=mountd
+      firewall-cmd --reload
+      ;;
+    sles|opensuse*)
+      zypper install -y firewalld
+      systemctl enable --now firewalld
+      firewall-cmd --permanent --add-service=nfs
+      firewall-cmd --permanent --add-service=rpc-bind
+      firewall-cmd --permanent --add-service=mountd
+      firewall-cmd --reload
+      ;;
+    *)
+      echo "⚠️ Firewall not configured: Unsupported distro ($DISTRO)."
+      ;;
+  esac
+}
+
+install_nfs_server_packages() {
+  case $DISTRO in
+    ubuntu|debian)
+      apt install -y nfs-kernel-server
+      ;;
+    rhel|centos|fedora)
+      yum install -y nfs-utils
+      systemctl enable --now nfs-server
+      ;;
+    sles|opensuse*)
+      zypper install -y nfs-kernel-server
+      systemctl enable --now nfsserver
+      ;;
+    *)
+      echo "❌ Unsupported distro for NFS Server: $DISTRO"
+      exit 1
+      ;;
+  esac
+}
+
+install_nfs_client_packages() {
+  case $DISTRO in
+    ubuntu|debian)
+      apt install -y nfs-common rpcbind
+      ;;
+    rhel|centos|fedora)
+      yum install -y nfs-utils
+      systemctl enable --now rpcbind
+      ;;
+    sles|opensuse*)
+      zypper install -y nfs-client
+      systemctl enable --now rpcbind
+      ;;
+    *)
+      echo "❌ Unsupported distro for NFS Client: $DISTRO"
+      exit 1
+      ;;
+  esac
+}
+
+# --------------------------- Main Flow ---------------------------
+
 read -p "Enter the role of this machine (server/client): " ROLE
 read -p "Enter the counterpart IP (Client IP if you're on server, or Server IP if you're on client): " PEER_IP
- 
-# --------- Common Firewall Setup (Client or Server) ---------
-echo "Ensuring UFW is installed and active..."
-apt update && apt install -y ufw
- 
-echo "Allowing SSH to prevent lockout..."
-ufw allow ssh
- 
-echo "Allowing NFS traffic from $PEER_IP..."
-ufw allow from $PEER_IP to any port 2049 proto tcp
- 
-echo "Enabling UFW..."
-ufw --force enable
- 
-# --------- SERVER SETUP ---------
+
+detect_distro
+install_firewall_and_open_ports
+
 if [[ "$ROLE" == "server" ]]; then
-    echo "Installing NFS server utilities..."
-    if ! apt install -y nfs-kernel-server; then
-        echo "ERROR: Failed to install nfs-kernel-server. Exiting."
-        exit 1
-    fi
- 
-    echo "Checking for exportfs command..."
-    if ! command -v exportfs >/dev/null; then
-        echo "ERROR: exportfs command not found. NFS server installation may have failed."
-        exit 1
-    fi
- 
-    echo "Creating export directory..."
-    mkdir -p /nfsshare
-    chown nobody:nogroup /nfsshare
- 
-    EXPORTS_LINE="/nfsshare ${PEER_IP}(rw,sync,no_subtree_check)"
-    echo "Updating /etc/exports..."
-    grep -q "$PEER_IP" /etc/exports || echo "$EXPORTS_LINE" >> /etc/exports
- 
-    echo "Applying export changes..."
-    exportfs -ra
- 
-    echo "Checking for nfs-kernel-server service..."
-    if systemctl list-unit-files | grep -q nfs-kernel-server.service; then
-        echo "Restarting nfs-kernel-server..."
-        systemctl restart nfs-kernel-server
-    else
-        echo "Warning: nfs-kernel-server.service not found. NFS may not function properly."
-    fi
- 
-# --------- CLIENT SETUP ---------
+  echo "🔧 Setting up NFS Server on $DISTRO..."
+
+  install_nfs_server_packages
+
+  mkdir -p /nfsshare
+  chown nobody:nogroup /nfsshare 2>/dev/null || chown nobody:nobody /nfsshare
+
+  EXPORT_LINE="/nfsshare ${PEER_IP}(rw,sync,no_subtree_check)"
+  grep -q "$PEER_IP" /etc/exports || echo "$EXPORT_LINE" >> /etc/exports
+
+  exportfs -ra
+
+  case $DISTRO in
+    ubuntu|debian)
+      systemctl restart nfs-kernel-server
+      ;;
+    rhel|centos|fedora)
+      systemctl restart nfs-server
+      ;;
+    sles|opensuse*)
+      systemctl restart nfsserver
+      ;;
+  esac
+
 elif [[ "$ROLE" == "client" ]]; then
-    echo "Installing NFS client utilities..."
-    apt install -y nfs-common rpcbind
- 
-    echo "Creating mount directory..."
-    mkdir -p /nfs_clinetshare
- 
-    echo "Updating /etc/fstab for persistent mount..."
-    grep -q "$PEER_IP:/nfsshare" /etc/fstab || echo "$PEER_IP:/nfsshare /nfs_clinetshare nfs defaults 0 0" >> /etc/fstab
- 
-    echo "Mounting NFS share..."
-    mount -a
-    mount /nfs_clinetshare
- 
-    echo "Verifying mount..."
-    df -h /nfs_clinetshare
- 
+  echo "🔧 Setting up NFS Client on $DISTRO..."
+
+  install_nfs_client_packages
+
+  mkdir -p /nfs_clientshare
+
+  grep -q "$PEER_IP:/nfsshare" /etc/fstab || echo "$PEER_IP:/nfsshare /nfs_clientshare nfs defaults 0 0" >> /etc/fstab
+
+  mount -a || { echo "❌ Mount failed. Check network or server availability."; exit 1; }
+
+  df -h /nfs_clientshare
+
 else
-    echo "Invalid role specified. Please enter 'server' or 'client'."
-    exit 1
+  echo "❌ Invalid role. Please enter 'server' or 'client'."
+  exit 1
 fi
- 
-echo "$ROLE setup complete with UFW and NFS configuration."
+
+echo "✅ $ROLE setup complete on $DISTRO with NFS and firewall configuration."
